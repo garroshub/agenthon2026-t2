@@ -414,7 +414,7 @@ def _estimate_parameters(innov: dict[str, pd.Series], spec: ForecastSpec) -> tup
     else:
         aligned = pd.concat(normalized, axis=1).sort_index().tail(500)
         corr_df = aligned.corr(min_periods=20).reindex(index=spec.assets, columns=spec.assets)
-        corr = corr_df.to_numpy(float)
+        corr = corr_df.to_numpy(float).copy()
         corr[~np.isfinite(corr)] = 0.0
         np.fill_diagonal(corr, 1.0)
         corr = 0.65 * corr + 0.35 * np.eye(n)
