@@ -15,6 +15,7 @@ import pandas as pd
 
 N_DRAWS = 1000
 STUDENT_DF = 7.0
+PARTICIPANT_OUTPUT_FILES = ("forecast.parquet", "forecast_meta.json", "forecast_rationale.md")
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,54 @@ def _load_target_history(panel_dir: Path, spec: ForecastSpec) -> dict[str, pd.Se
             raise ValueError(f"target asset {asset!r} has no usable observations through asof")
         series = pd.Series(part["value"].to_numpy(float), index=pd.DatetimeIndex(part["date"]), name=asset)
         out[asset] = series
+    return out
+
+
+def _clean_participant_outputs(out_path: Path) -> None:
+    out_dir = out_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name in PARTICIPANT_OUTPUT_FILES:
+        path = out_dir / name
+        if path.exists():
+            path.unlink()
+
+
+def _load_best_effort_history(panel_dir: Path, spec: ForecastSpec) -> dict[str, pd.Series]:
+    buckets: dict[str, list[pd.DataFrame]] = {asset: [] for asset in spec.assets}
+    for path in _candidate_panel_paths(panel_dir, spec.target_panel):
+        try:
+            frame = pd.read_parquet(path)
+        except Exception:
+            continue
+        asset_col = "asset" if "asset" in frame.columns else "asset_id" if "asset_id" in frame.columns else None
+        if asset_col is None or "date" not in frame.columns or "value" not in frame.columns:
+            continue
+        try:
+            sub = frame[["date", asset_col, "value"]].rename(columns={asset_col: "asset"}).copy()
+            sub["asset"] = sub["asset"].astype(str)
+            sub = sub[sub["asset"].isin(spec.assets)]
+            if sub.empty:
+                continue
+            sub["date"] = pd.to_datetime(sub["date"], errors="coerce")
+            sub["value"] = pd.to_numeric(sub["value"], errors="coerce")
+            sub = sub[(sub["date"].notna()) & (sub["date"] <= pd.Timestamp(spec.asof))]
+            for asset in spec.assets:
+                part = sub[sub["asset"] == asset]
+                if not part.empty:
+                    buckets[asset].append(part[["date", "value"]])
+        except Exception:
+            continue
+    out: dict[str, pd.Series] = {}
+    for asset in spec.assets:
+        if not buckets[asset]:
+            out[asset] = pd.Series(dtype=float, name=asset)
+            continue
+        part = pd.concat(buckets[asset], ignore_index=True)
+        part = part.sort_values("date").drop_duplicates("date", keep="last")
+        values = pd.to_numeric(part["value"], errors="coerce").to_numpy(float)
+        dates = pd.DatetimeIndex(part["date"])
+        mask = np.isfinite(values)
+        out[asset] = pd.Series(values[mask], index=dates[mask], name=asset)
     return out
 
 
@@ -260,6 +309,92 @@ def _nearest_correlation(corr: np.ndarray) -> np.ndarray:
     return psd
 
 
+def _safe_log_innovations(series: pd.Series) -> pd.Series:
+    if series.empty:
+        return pd.Series(dtype=float, name=series.name)
+    raw = pd.to_numeric(series, errors="coerce").to_numpy(float)
+    mask = np.isfinite(raw) & (raw > -1.0)
+    if not np.any(mask):
+        return pd.Series(dtype=float, name=series.name)
+    return pd.Series(np.log1p(raw[mask]), index=series.index[mask], name=series.name)
+
+
+def _safe_scale(x: np.ndarray, default: float) -> float:
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return float(max(default, 1e-9))
+    tail = x[-300:]
+    med = float(np.median(tail))
+    mad = float(1.4826 * np.median(np.abs(tail - med)))
+    std = float(np.std(tail, ddof=1))
+    candidates = [v for v in (mad, std) if np.isfinite(v) and v > 0]
+    scale = float(np.median(candidates)) if candidates else float(default)
+    return max(scale, float(default), 1e-9)
+
+
+def _factor_safe_parameters(
+    history: dict[str, pd.Series], spec: ForecastSpec
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    innovations: list[pd.Series] = []
+    drifts: list[float] = []
+    scales: list[float] = []
+    anchors = np.zeros(len(spec.assets), dtype=float)
+    for asset in spec.assets:
+        series = history.get(asset, pd.Series(dtype=float, name=asset))
+        x = _safe_log_innovations(series)
+        arr = x.to_numpy(float)
+        scale = _safe_scale(arr, 0.01)
+        center = float(np.median(arr[-120:])) if arr.size else 0.0
+        drifts.append(0.05 * center)
+        scales.append(scale)
+        innovations.append(((x - drifts[-1]) / scale).rename(asset))
+
+    n = len(spec.assets)
+    corr = np.eye(n, dtype=float)
+    for i in range(n):
+        for j in range(i + 1, n):
+            pair = pd.concat([innovations[i], innovations[j]], axis=1, join="inner").dropna().tail(500)
+            value = 0.0
+            if len(pair) >= 20:
+                a = pair.iloc[:, 0].to_numpy(float)
+                b = pair.iloc[:, 1].to_numpy(float)
+                if np.std(a) > 1e-12 and np.std(b) > 1e-12:
+                    candidate = float(np.corrcoef(a, b)[0, 1])
+                    if np.isfinite(candidate):
+                        value = candidate
+            corr[i, j] = corr[j, i] = 0.40 * value
+    corr = _nearest_correlation(corr)
+    return np.asarray(drifts), np.asarray(scales), corr, anchors
+
+
+def _universal_safe_parameters(
+    history: dict[str, pd.Series], spec: ForecastSpec
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    drifts: list[float] = []
+    scales: list[float] = []
+    anchors: list[float] = []
+    for asset in spec.assets:
+        series = history.get(asset, pd.Series(dtype=float, name=asset))
+        if spec.target_type == "log_return":
+            x = _safe_log_innovations(series).to_numpy(float)
+            drifts.append(0.0)
+            scales.append(_safe_scale(x, 0.01))
+            anchors.append(0.0)
+        else:
+            finite = series[np.isfinite(series.to_numpy(float))] if not series.empty else series
+            anchor = float(finite.iloc[-1]) if len(finite) else 0.0
+            increments = _valid_level_increments(finite, monthly=spec.target_frequency == "monthly")
+            x = increments.to_numpy(float)
+            drift = float(np.mean(x[-300:])) if x.size else 0.0
+            default = max(abs(anchor) * 0.005, 0.01)
+            drifts.append(drift if np.isfinite(drift) else 0.0)
+            scales.append(_safe_scale(x, default))
+            anchors.append(anchor)
+    n = len(spec.assets)
+    return np.asarray(drifts), np.asarray(scales), np.eye(n), np.asarray(anchors)
+
+
 def _estimate_parameters(innov: dict[str, pd.Series], spec: ForecastSpec) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     monthly = spec.target_frequency == "monthly"
     drifts: list[float] = []
@@ -376,6 +511,17 @@ def _step_matrix(root: Path, spec: ForecastSpec, history: dict[str, pd.Series]) 
     return np.tile(arr, (len(spec.assets), 1))
 
 
+def _emergency_step_matrix(root: Path, spec: ForecastSpec, history: dict[str, pd.Series]) -> np.ndarray:
+    try:
+        return _step_matrix(root, spec, history)
+    except Exception:
+        if spec.target_frequency == "monthly":
+            base = np.asarray([max(1, int(round(h / 21.0))) for h in spec.horizons], dtype=int)
+        else:
+            base = np.asarray([max(1, int(h)) for h in spec.horizons], dtype=int)
+        return np.tile(base, (len(spec.assets), 1))
+
+
 def _simulate_draws(
     spec: ForecastSpec,
     history: dict[str, pd.Series],
@@ -410,7 +556,44 @@ def _simulate_draws(
     return out
 
 
-def _write_outputs(out_path: Path, spec: ForecastSpec, draws: np.ndarray) -> None:
+def _simulate_gaussian_fallback(
+    spec: ForecastSpec,
+    drifts: np.ndarray,
+    scales: np.ndarray,
+    corr: np.ndarray,
+    anchors: np.ndarray,
+    steps: np.ndarray,
+    n_draws: int,
+    seed_suffix: str,
+) -> np.ndarray:
+    max_steps = max(1, int(np.max(steps)))
+    n_assets = len(spec.assets)
+    digest = hashlib.sha256(f"{_stable_seed(spec.unit_id, spec.asof)}|{seed_suffix}".encode("utf-8")).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big") % (2**32))
+    try:
+        chol = np.linalg.cholesky(_nearest_correlation(corr))
+    except Exception:
+        chol = np.eye(n_assets)
+    z = rng.standard_normal((n_draws, max_steps, n_assets)) @ chol.T
+    shocks = drifts.reshape(1, 1, -1) + scales.reshape(1, 1, -1) * z
+    csum = np.cumsum(shocks, axis=1)
+    out = np.empty((n_draws, n_assets, len(spec.horizons)), dtype=float)
+    for ai in range(n_assets):
+        for hi in range(len(spec.horizons)):
+            s = max(1, int(steps[ai, hi]))
+            out[:, ai, hi] = float(anchors[ai]) + csum[:, s - 1, ai]
+    if not np.all(np.isfinite(out)):
+        raise FloatingPointError("non-finite fallback forecast")
+    return out
+
+
+def _write_outputs(
+    out_path: Path,
+    spec: ForecastSpec,
+    draws: np.ndarray,
+    method: str = "primary_v1_hybrid",
+    rationale_body: str | None = None,
+) -> None:
     out_dir = out_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     n_draws, n_assets, n_horizons = draws.shape
@@ -433,20 +616,20 @@ def _write_outputs(out_path: Path, spec: ForecastSpec, draws: np.ndarray) -> Non
         "units": spec.value_unit,
         "rationale": {
             "file": "forecast_rationale.md",
-            "method": "pure numerical hybrid: M0-like Gaussian level paths; calibrated Student-t log-return paths; no text or House calls",
+            "method": method,
         },
     }
     (out_dir / "forecast_meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    rationale = (
-        "# Forecast rationale\n\n"
-        "This submission uses only panel observations available through the supplied as-of date. "
-        "For level targets it uses a trailing-300 joint Gaussian random walk with unshrunk mean "
-        "steps, sample covariance, gap filtering, and a shared path across horizons. For cumulative "
-        "log-return targets it converts decimal simple returns with log1p, shrinks recent drift, "
-        "uses a 0.90 robust/EWMA scale multiplier and shrunk cross-asset correlation, then simulates "
-        "finite-variance Student-t innovations from a zero anchor. No text or "
-        "House-model call is used in this version.\n"
-    )
+    if rationale_body is None:
+        rationale_body = (
+            "This submission uses only panel observations available through the supplied as-of date. "
+            "For level targets it uses a trailing-300 joint Gaussian random walk with unshrunk mean "
+            "steps, sample covariance, gap filtering, and a shared path across horizons. For cumulative "
+            "log-return targets it converts decimal simple returns with log1p, shrinks recent drift, "
+            "uses a 0.90 robust/EWMA scale multiplier and shrunk cross-asset correlation, then simulates "
+            "finite-variance Student-t innovations from a zero anchor. No text or House-model call is used."
+        )
+    rationale = "# Forecast rationale\n\n" + rationale_body.strip() + "\n"
     (out_dir / "forecast_rationale.md").write_text(rationale, encoding="utf-8")
 
 
@@ -457,15 +640,107 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
     if not (200 <= int(n_draws) <= 20000):
         raise ValueError("n_draws must be in [200, 20000]")
     _card, spec = _read_card(root, asof)
-    history = _load_target_history(ctx.panel_dir, spec)
-    innov = _innovation_series(history, spec)
+    _clean_participant_outputs(out_path)
+
+    try:
+        history = _load_target_history(ctx.panel_dir, spec)
+        innov = _innovation_series(history, spec)
+        if spec.target_type == "level":
+            drifts, scales, corr = _estimate_level_m0_parameters(history, spec)
+        else:
+            drifts, scales, corr = _estimate_parameters(innov, spec)
+        steps = _step_matrix(root, spec, history)
+        draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
+        _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
+        return out_path
+    except Exception:
+        _clean_participant_outputs(out_path)
+
+    is_factor_multiasset = (
+        spec.target_type == "log_return"
+        and spec.target_frequency == "daily"
+        and len(spec.assets) > 1
+        and spec.target_panel == "factors_daily"
+    )
+    if is_factor_multiasset:
+        try:
+            history = _load_best_effort_history(ctx.panel_dir, spec)
+            drifts, scales, corr, anchors = _factor_safe_parameters(history, spec)
+            steps = _emergency_step_matrix(root, spec, history)
+            draws = _simulate_gaussian_fallback(
+                spec, drifts, scales, corr, anchors, steps, int(n_draws), "factor-safe"
+            )
+            _write_outputs(
+                out_path,
+                spec,
+                draws,
+                method="factor_safe_joint",
+                rationale_body=(
+                    "The primary numerical path could not complete, so this unit used the crash-safe "
+                    "multi-asset factor fallback. It filters invalid simple returns before log1p, uses "
+                    "strongly shrunk drift and pairwise-complete correlations, repairs dependence to a "
+                    "PSD correlation matrix, and simulates coherent Gaussian paths across horizons."
+                ),
+            )
+            return out_path
+        except Exception:
+            _clean_participant_outputs(out_path)
+
+    try:
+        history = _load_best_effort_history(ctx.panel_dir, spec)
+        drifts, scales, corr, anchors = _universal_safe_parameters(history, spec)
+        steps = _emergency_step_matrix(root, spec, history)
+        draws = _simulate_gaussian_fallback(
+            spec, drifts, scales, corr, anchors, steps, int(n_draws), "universal-safe"
+        )
+        _write_outputs(
+            out_path,
+            spec,
+            draws,
+            method="universal_safe_fallback",
+            rationale_body=(
+                "The primary numerical path could not complete, so this unit used the universal crash-safe "
+                "fallback. It preserves the declared asset and horizon grid, uses finite best-effort historical "
+                "anchors and scales, and simulates independent Gaussian paths with deterministic randomness."
+            ),
+        )
+        return out_path
+    except Exception:
+        _clean_participant_outputs(out_path)
+
+    n_assets = len(spec.assets)
+    n_horizons = len(spec.horizons)
+    anchors = np.zeros(n_assets, dtype=float)
     if spec.target_type == "level":
-        drifts, scales, corr = _estimate_level_m0_parameters(history, spec)
-    else:
-        drifts, scales, corr = _estimate_parameters(innov, spec)
-    steps = _step_matrix(root, spec, history)
-    draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
-    _write_outputs(out_path, spec, draws)
+        try:
+            last_history = _load_best_effort_history(ctx.panel_dir, spec)
+            for ai, asset in enumerate(spec.assets):
+                series = last_history.get(asset, pd.Series(dtype=float))
+                if len(series):
+                    value = float(series.iloc[-1])
+                    if np.isfinite(value):
+                        anchors[ai] = value
+        except Exception:
+            pass
+    digest = hashlib.sha256(f"{_stable_seed(spec.unit_id, spec.asof)}|contract-last-resort".encode("utf-8")).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big") % (2**32))
+    draws = np.empty((int(n_draws), n_assets, n_horizons), dtype=float)
+    for ai in range(n_assets):
+        base_scale = 0.01 if spec.target_type == "log_return" else max(abs(anchors[ai]) * 0.0025, 0.01)
+        for hi, horizon in enumerate(spec.horizons):
+            effective_steps = max(1, int(round(horizon / 21.0))) if spec.target_frequency == "monthly" else max(1, int(horizon))
+            draws[:, ai, hi] = anchors[ai] + base_scale * math.sqrt(effective_steps) * rng.standard_normal(int(n_draws))
+    _write_outputs(
+        out_path,
+        spec,
+        draws,
+        method="contract_last_resort",
+        rationale_body=(
+            "All richer numerical paths failed, so this unit used the final contract-preserving fallback. "
+            "It uses only the parsed task contract, finite protected anchors when available, and a small "
+            "deterministic independent Gaussian dispersion to guarantee a valid forecast grid."
+        ),
+    )
     return out_path
 
 
