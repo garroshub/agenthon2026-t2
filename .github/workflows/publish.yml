@@ -1,8 +1,8 @@
-name: Build Track 2 submission image
+﻿name: Build Track 2 submission image
 
 on:
   push:
-    branches: [main]
+    branches: [v3-house-probe]
   workflow_dispatch:
 
 permissions:
@@ -27,4 +27,5 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/${{ github.repository_owner }}/agenthon2026-t2:v2-safe
+            ghcr.io/${{ github.repository_owner }}/agenthon2026-t2:v3-house-probe
+

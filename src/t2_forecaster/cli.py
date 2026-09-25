@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .house_overlay import maybe_apply
+
 N_DRAWS = 1000
 STUDENT_DF = 7.0
 PARTICIPANT_OUTPUT_FILES = ("forecast.parquet", "forecast_meta.json", "forecast_rationale.md")
@@ -633,7 +635,7 @@ def _write_outputs(
     (out_dir / "forecast_rationale.md").write_text(rationale, encoding="utf-8")
 
 
-def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int = N_DRAWS) -> Path:
+def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int = N_DRAWS, text: str | Path | None = None) -> Path:
     ctx = _resolve_input_context(panels)
     root = ctx.unit_root
     out_path = Path(out)
@@ -651,7 +653,34 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
             drifts, scales, corr = _estimate_parameters(innov, spec)
         steps = _step_matrix(root, spec, history)
         draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
-        _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
+        try:
+            overlay = maybe_apply(
+                draws,
+                target_type=spec.target_type,
+                target_frequency=spec.target_frequency,
+                assets=spec.assets,
+                asof=spec.asof,
+                text_dir=text,
+            )
+        except Exception:
+            overlay = None
+        if overlay is not None and overlay.applied:
+            draws = overlay.draws
+            _write_outputs(
+                out_path,
+                spec,
+                draws,
+                method="primary_v1_hybrid_house_probe",
+                rationale_body=(
+                    "The V2-safe primary numerical forecast completed first. A single organizer House-model "
+                    "call then extracted a strictly grounded future-policy-path claim from the latest recent "
+                    f"policy document ({overlay.doc_id}). The fixed semantic signal {overlay.signal:.3f} "
+                    "shifted each horizon center by 0.12 of that cell's predictive standard deviation. "
+                    "Dispersion, tails, horizons, and all fallback paths are unchanged."
+                ),
+            )
+        else:
+            _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
         return out_path
     except Exception:
         _clean_participant_outputs(out_path)
@@ -756,7 +785,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    forecast_unit(args.panels, args.asof, args.out, args.draws)
+    forecast_unit(args.panels, args.asof, args.out, args.draws, text=args.text)
     return 0
 
 

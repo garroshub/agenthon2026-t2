@@ -12,6 +12,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY src /app/src
 COPY LICENSE /app/LICENSE
 COPY forecast /usr/local/bin/forecast
-RUN chmod +x /usr/local/bin/forecast
+RUN sed -i 's/\r$//' /usr/local/bin/forecast && chmod +x /usr/local/bin/forecast
 
 CMD ["forecast", "--help"]
