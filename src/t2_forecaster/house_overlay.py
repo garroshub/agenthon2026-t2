@@ -9,7 +9,7 @@ import numpy as np
 TIMEOUT=45; MAX_TOKENS=1200; MAX_BYTES=524288; MAX_CHARS=24000; MAX_AGE=3
 MIN_CONF=.90; MIN_SIGNAL=.35; SHIFT=.12
 ASSETS={"UST_2Y","UST_10Y"}
-DOC_TYPES={"fomc_statement","fomc_minutes","cb_speech","landmark"}
+DOC_TYPES={"fomc_statement","fomc_minutes"}
 KINDS={"announced_decision","current_assessment","conditional_or_forward_guidance","released_observation","balance_sheet_action","dissent_or_preference","other"}
 ACTORS={"committee","named_participant","issuer","data_release","other","unknown"}
 TIMES={"past","current","future","mixed","unknown"}
@@ -38,7 +38,7 @@ def _select_doc(td:Path,asof:str):
     if not p.is_file(): return None
     try: idx=json.loads(p.read_text(encoding="utf-8")); cutoff=date.fromisoformat(asof[:10])
     except Exception: return None
-    pr={"fomc_statement":4,"cb_speech":3,"landmark":3,"fomc_minutes":2}; rows=[]
+    pr={"fomc_statement":4,"fomc_minutes":2}; rows=[]
     for x in idx.get("documents",[]):
         if not isinstance(x,dict): continue
         typ=str(x.get("doc_type","")); ts=str(x.get("timestamp",""))[:10]
@@ -111,8 +111,12 @@ def _valid(obj,source):
         q=c["confidence"]
         if type(q) not in (int,float) or isinstance(q,bool) or not math.isfinite(float(q)) or not 0<=float(q)<=1: continue
         a,b=c["span_start"],c["span_end"]
-        if type(a) is not int or type(b) is not int or not(0<=a<b<=len(source)): continue
-        if not isinstance(c["quote"],str) or c["quote"]!=source[a:b]: continue
+        quote=c["quote"]
+        if not isinstance(quote,str) or not quote: continue
+        span_ok=type(a) is int and type(b) is int and 0<=a<b<=len(source) and quote==source[a:b]
+        if not span_ok:
+            first=source.find(quote)
+            if first<0 or source.find(quote,first+1)>=0: continue
         out.append(c)
     return out
 
@@ -125,8 +129,8 @@ def _piece(c,typ):
         if a=="committee": w=1.
         elif a=="named_participant" and typ in {"cb_speech","landmark"}: w=.70
         else: return None
-    elif k=="dissent_or_preference" and a=="named_participant": w=.35
-    elif k=="balance_sheet_action" and a=="committee": w=.50
+    elif k=="dissent_or_preference" and a=="named_participant" and c["temporal_scope"] in {"future","mixed"}: w=.35
+    elif k=="balance_sheet_action" and a=="committee" and c["temporal_scope"] in {"future","mixed"}: w=.50
     else: return None
     return sg*q*w,q*w
 
