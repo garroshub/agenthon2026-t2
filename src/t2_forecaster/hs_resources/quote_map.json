@@ -1,0 +1,28 @@
+{
+  "version": "v3-hs-s1.0",
+  "semantic_space": "local_currency_per_USD",
+  "native_quote": {
+    "AUD": "USD_per_ccy",
+    "EUR": "USD_per_ccy",
+    "GBP": "USD_per_ccy",
+    "NZD": "USD_per_ccy",
+    "CAD": "ccy_per_USD",
+    "CHF": "ccy_per_USD",
+    "DKK": "ccy_per_USD",
+    "JPY": "ccy_per_USD",
+    "NOK": "ccy_per_USD",
+    "SEK": "ccy_per_USD"
+  },
+  "transform_sign_local_to_native": {
+    "AUD": -1,
+    "EUR": -1,
+    "GBP": -1,
+    "NZD": -1,
+    "CAD": 1,
+    "CHF": 1,
+    "DKK": 1,
+    "JPY": 1,
+    "NOK": 1,
+    "SEK": 1
+  }
+}

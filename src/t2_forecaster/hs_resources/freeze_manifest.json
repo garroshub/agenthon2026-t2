@@ -1,0 +1,43 @@
+{
+  "protocol": "V3-HS-S1",
+  "schema_version": "v3-hs-s1.0",
+  "frozen_date": "2026-09-25",
+  "status": "S1_CONTRACT_FROZEN_BEFORE_TEST_EXECUTION",
+  "house_requests_per_unit": 1,
+  "house_max_output_tokens": 1800,
+  "house_http_timeout_seconds": 45,
+  "house_total_deadline_seconds": 90,
+  "retrieval_max_chars": 30000,
+  "retrieval_max_docs": 6,
+  "retrieval_max_snippets": 8,
+  "mix_alpha": 0.25,
+  "scenario_strength": 0.5,
+  "graph_equivalence_max_abs_tol": 1e-10,
+  "psd_repair_fro_max": 1e-06,
+  "min_r0_eigen": 1e-05,
+  "max_r0_condition": 1000000.0,
+  "max_realized_target_rankcorr_error": 0.02,
+  "eigen_floor": 1e-08,
+  "explicit_noop": "direct_return_original_V2_draws",
+  "official_resource_ceiling": {
+    "requests_per_unit": 25,
+    "output_tokens_per_request": 4000,
+    "container_clock_seconds": 1800
+  },
+  "no_real_house_local": true,
+  "no_24_release": true,
+  "no_realized_outcomes": true,
+  "file_sha256": {
+    "experiments/v3_house_scenario_graph/schema.json": "407785998f51725cf68b67edafe0aa737e2866c8e564edd971edef1b203dc21e",
+    "experiments/v3_house_scenario_graph/prompt.txt": "90334655916eaa8111568b7e17890476d97392ff3bb56e0e3fc7d2acf106ca08",
+    "experiments/v3_house_scenario_graph/retrieval_config.json": "ac76dfa614bff1dc316df2b13117fd90f0c51205d825721192f9d5475526fc3f",
+    "experiments/v3_house_scenario_graph/quote_map.json": "d66a509577055649490743bd622d8afe2e8c0aeeb7c60e2befc8402a478b9439",
+    "experiments/v3_house_scenario_graph/s1_runtime.py": "666eac8167470e9292a9776042567154a4dd0dff8ebc41e991e7efe3d6810593",
+    "experiments/v3_house_scenario_graph/s1_contract_tests.py": "f5136f78d8be5eb60e7f63b45845862a163c2500bb107997bbde5682f6ae101c",
+    "experiments/v3_house_scenario_graph/s0_human_fixtures.json": "292c2907d9bdac8d353ae129b0dbf4727933c20ef2796e4a8788f360d8ff2bc4",
+    "experiments/v3_house_scenario_graph/s0_numeric_feasibility.py": "a0b03b8bd4c72cae814aec3ea4e4603a8a8aef0407576eec9f006b656b8e3e8c",
+    "submission_repo/src/t2_forecaster/cli.py": "c820f5d9c86dd50e9ac7b2af2b206ac24fec45ad18ce79e25e4cf4bff6fdd5d5",
+    "reference/track2-forecasting-public/README.md": "d6e225cc7c3e75d5fd477606de96384591f6efc6e2e08c26271d419e42f75d4e",
+    "reference/track2-forecasting-public/docs/NVIDIA-STACK.md": "59ffd0bf449f7fbf15506a85ea232010ad253180916160b849bc9750760f9f9d"
+  }
+}

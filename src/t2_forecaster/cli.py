@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import house_scenario
+
 N_DRAWS = 1000
 STUDENT_DF = 7.0
 PARTICIPANT_OUTPUT_FILES = ("forecast.parquet", "forecast_meta.json", "forecast_rationale.md")
@@ -633,7 +635,7 @@ def _write_outputs(
     (out_dir / "forecast_rationale.md").write_text(rationale, encoding="utf-8")
 
 
-def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int = N_DRAWS) -> Path:
+def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int = N_DRAWS, text_dir: str | Path | None = None) -> Path:
     ctx = _resolve_input_context(panels)
     root = ctx.unit_root
     out_path = Path(out)
@@ -651,7 +653,32 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
             drifts, scales, corr = _estimate_parameters(innov, spec)
         steps = _step_matrix(root, spec, history)
         draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
-        _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
+        hs = house_scenario.maybe_apply(
+            draws,
+            target_type=spec.target_type,
+            target_frequency=spec.target_frequency,
+            assets=spec.assets,
+            horizons=spec.horizons,
+            target_panel=spec.target_panel,
+            asof=spec.asof,
+            text_dir=text_dir if text_dir is not None else (ctx.unit_root / "text"),
+        )
+        if hs.applied:
+            draws = hs.draws
+            _write_outputs(
+                out_path,
+                spec,
+                draws,
+                method="primary_v1_hybrid_house_scenario_graph",
+                rationale_body=(
+                    "The numerical V2 forecast generated the marginal samples. Cutoff-safe supplied text was "
+                    "read once by the organizer House model to construct an explicitly hypothetical low-rank "
+                    "cross-asset scenario graph. The deterministic dependence transport preserves every "
+                    "asset-by-horizon marginal sample multiset and changes only joint dependence."
+                ),
+            )
+        else:
+            _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
         return out_path
     except Exception:
         _clean_participant_outputs(out_path)
@@ -756,7 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    forecast_unit(args.panels, args.asof, args.out, args.draws)
+    forecast_unit(args.panels, args.asof, args.out, args.draws, args.text)
     return 0
 
 
