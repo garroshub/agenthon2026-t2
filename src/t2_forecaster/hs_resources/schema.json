@@ -1,8 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "V3-HS House Scenario Graph",
+  "title": "V3-HS Runtime Repair House Scenario Graph",
   "type": "object",
-  "additionalProperties": false,
   "required": [
     "schema_version",
     "abstain",
@@ -13,7 +12,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "v3-hs-s1.0"
+      "const": "v3-hs-s1.1-runtime-repair"
     },
     "abstain": {
       "type": "boolean"
@@ -25,44 +24,24 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": [
           "fact_id",
           "doc_id",
-          "published_at",
-          "span_start",
-          "span_end",
           "quote",
           "claim"
         ],
         "properties": {
           "fact_id": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "doc_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "published_at": {
-            "type": "string",
-            "minLength": 10
-          },
-          "span_start": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "span_end": {
-            "type": "integer",
-            "minimum": 1
+            "type": "string"
           },
           "quote": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           },
           "claim": {
-            "type": "string",
-            "minLength": 1
+            "type": "string"
           }
         }
       }
@@ -71,100 +50,18 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": [
           "assumption_id",
           "mechanism",
           "conditions",
           "counterexample",
           "fact_refs"
-        ],
-        "properties": {
-          "assumption_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "mechanism": {
-            "type": "string",
-            "minLength": 1
-          },
-          "conditions": {
-            "type": "string",
-            "minLength": 1
-          },
-          "counterexample": {
-            "type": "string",
-            "minLength": 1
-          },
-          "fact_refs": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "string",
-              "minLength": 1
-            }
-          }
-        }
+        ]
       }
     },
     "scenarios": {
       "type": "array",
-      "maxItems": 2,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "scenario_id",
-          "condition",
-          "factors",
-          "asset_loadings"
-        ],
-        "properties": {
-          "scenario_id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "condition": {
-            "type": "string",
-            "minLength": 1
-          },
-          "factors": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 2,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "factor_id",
-                "description",
-                "rationale_refs"
-              ],
-              "properties": {
-                "factor_id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "description": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "rationale_refs": {
-                  "type": "array",
-                  "minItems": 1,
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                }
-              }
-            }
-          },
-          "asset_loadings": {
-            "type": "object"
-          }
-        }
-      }
+      "maxItems": 2
     }
   }
 }

@@ -1,0 +1,37 @@
+{
+  "protocol": "V3-HS-runtime-contract-repair",
+  "date": "2026-09-25",
+  "schema_version": "v3-hs-s1.1-runtime-repair",
+  "status": "LOCAL_RELEASE_GATES_PASS_NOT_PUBLISHED",
+  "numerical_design_changed": false,
+  "structural_eligibility_changed": false,
+  "mix_alpha": 0.25,
+  "scenario_strength": 0.5,
+  "repair_scope": [
+    "assumptions_optional",
+    "fact_quote_local_resolution",
+    "single_json_fence_or_light_wrapper_tolerance",
+    "harmless_extra_top_level_key_canonicalization",
+    "numeric_string_loading_coercion",
+    "missing_declared_factor_loading_defaults_zero"
+  ],
+  "still_fail_closed": [
+    "fabricated_or_ambiguous_quote",
+    "unknown_ref",
+    "missing_or_extra_asset",
+    "unknown_factor",
+    "non_enum_loading",
+    "multiple_json_objects",
+    "malformed_abstain",
+    "equivalent_graph",
+    "future_leakage",
+    "numeric_safety_failure"
+  ],
+  "house_transport_changed": false,
+  "house_scenario_sha256": "afb68dd01f1724cf39c6226044e078c7956f7b8314add6c807b20fe850a0f617",
+  "cli_sha256": "8ebf37e26687aeb1ca0912854bc86d17603477a4d55830532b6f7e64407c8a9b",
+  "contract_tests": "22/22 PASS",
+  "no_house_exact_parity": "104/104",
+  "mock_activation": "4/4 with exact marginals",
+  "official_smoke": "104/104 current-main PASS"
+}
