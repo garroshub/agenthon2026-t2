@@ -6,7 +6,7 @@ import json
 import math
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,17 @@ import pandas as pd
 N_DRAWS = 1000
 STUDENT_DF = 7.0
 PARTICIPANT_OUTPUT_FILES = ("forecast.parquet", "forecast_meta.json", "forecast_rationale.md")
+
+FX21_COMMODITY_BETA = frozenset({"AUD", "CAD"})
+FX21_GATE_PROBE_SCALE = 0.95
+FX21_ACTION_SCALE = 0.975
+FX21_BACKTESTS = 8
+FX21_MIN_VALID = 6
+FX21_MIN_WIN_RATE = 0.625
+FX21_MAX_MEAN_DELTA = -0.002
+FX21_MAX_WORST_DELTA = 0.10
+FX21_TAIL_LEVELS = (0.01, 0.05, 0.95, 0.99)
+
 
 
 @dataclass(frozen=True)
@@ -587,6 +598,204 @@ def _simulate_gaussian_fallback(
     return out
 
 
+
+def _fx21_structurally_eligible(card: dict[str, Any], spec: ForecastSpec) -> bool:
+    """Frozen V5-FX21 production support.
+
+    Research validation covered exactly the seven public cards that are single-cell,
+    daily level G10 FX, horizon 21, and do not target AUD/CAD. Any broader future
+    structure fails closed to the original V2 forecast.
+    """
+    if (
+        spec.target_type != "level"
+        or spec.target_frequency != "daily"
+        or spec.target_panel != "g10_fx_daily"
+        or len(spec.assets) != 1
+        or len(spec.horizons) != 1
+        or int(spec.horizons[0]) > 21
+        or spec.assets[0] in FX21_COMMODITY_BETA
+    ):
+        return False
+    params = card.get("scoring", {}).get("params", {})
+    return str(params.get("joint", "variogram")) == "variogram"
+
+
+def _fx21_scale_draws(draws: np.ndarray, scale: float) -> np.ndarray:
+    base = np.asarray(draws, dtype=float)
+    center = np.mean(base, axis=0, keepdims=True)
+    out = center + float(scale) * (base - center)
+    if not np.all(np.isfinite(out)):
+        raise FloatingPointError("non-finite V5-FX21 calibrated forecast")
+    return out
+
+
+def _fx21_mean_abs_pairwise_sorted(x_sorted: np.ndarray) -> float:
+    x = np.asarray(x_sorted, dtype=float).reshape(-1)
+    m = x.size
+    if m == 0:
+        raise ValueError("empty sample")
+    i = np.arange(1, m + 1, dtype=float)
+    coef = 2.0 * i - m - 1.0
+    total = 2.0 * float(np.sum(coef * x))
+    denom = m * (m - 1) if m > 1 else m * m
+    return total / float(denom)
+
+
+def _fx21_crps(samples: np.ndarray, y: float) -> float:
+    x = np.asarray(samples, dtype=float).reshape(-1)
+    if x.size == 0 or not np.all(np.isfinite(x)) or not np.isfinite(y):
+        raise ValueError("invalid CRPS input")
+    term1 = float(np.mean(np.abs(x - float(y))))
+    spread = _fx21_mean_abs_pairwise_sorted(np.sort(x))
+    return term1 - 0.5 * spread
+
+
+def _fx21_tail_pinball(samples: np.ndarray, y: float, levels: tuple[float, ...]) -> float:
+    x = np.asarray(samples, dtype=float).reshape(-1)
+    total = 0.0
+    for a in levels:
+        q = float(np.quantile(x, a))
+        total += a * (y - q) if y >= q else (1.0 - a) * (q - y)
+    return total / float(len(levels))
+
+
+def _fx21_tail_coverage(samples: np.ndarray, y: float, levels: tuple[float, ...]) -> float:
+    x = np.asarray(samples, dtype=float).reshape(-1)
+    err = 0.0
+    for a in levels:
+        q = float(np.quantile(x, a))
+        coverage = 1.0 if y <= q else 0.0
+        err += abs(coverage - a)
+    return err
+
+
+def _fx21_score_params(card: dict[str, Any]) -> tuple[float, float, tuple[float, ...], str]:
+    params = card.get("scoring", {}).get("params", {})
+    weights = params.get("weights", {"marginal": 0.5, "joint": 0.3, "tail": 0.2})
+    w_m = float(weights["marginal"])
+    w_t = float(weights["tail"])
+    live = w_m + w_t
+    if live <= 0.0:
+        raise ValueError("nonpositive single-cell live weight")
+    levels = tuple(float(x) for x in params.get("tail_levels", FX21_TAIL_LEVELS))
+    if not levels:
+        raise ValueError("empty tail levels")
+    tail_metric = str(params.get("tail_metric", "pinball"))
+    if tail_metric not in {"pinball", "coverage"}:
+        raise ValueError("unsupported tail metric")
+    return w_m / live, w_t / live, levels, tail_metric
+
+
+def _fx21_raw_components(
+    samples: np.ndarray, y: float, card: dict[str, Any]
+) -> tuple[float, float, float, float]:
+    w_m, w_t, levels, tail_metric = _fx21_score_params(card)
+    marginal = _fx21_crps(samples, y)
+    if tail_metric == "pinball":
+        tail = _fx21_tail_pinball(samples, y, levels)
+    else:
+        tail = _fx21_tail_coverage(samples, y, levels)
+    return marginal, tail, w_m, w_t
+
+
+def _fx21_normalized_score(
+    samples: np.ndarray,
+    y: float,
+    card: dict[str, Any],
+    ref_marginal: float,
+    ref_tail: float,
+) -> float:
+    if not np.isfinite(ref_marginal) or not np.isfinite(ref_tail) or ref_marginal <= 0 or ref_tail <= 0:
+        raise ValueError("invalid reference scale")
+    marginal, tail, w_m, w_t = _fx21_raw_components(samples, y, card)
+    composite = w_m * (marginal / ref_marginal) + w_t * (tail / ref_tail)
+    return float(np.clip(composite, 0.0, 4.0))
+
+
+def _fx21_recent_origins(series: pd.Series, step: int) -> list[pd.Timestamp]:
+    s = series.sort_index()
+    n = len(s)
+    spacing = max(21, int(step))
+    valid = [i for i in range(320, n) if i + int(step) < n]
+    chosen: list[int] = []
+    for loc in reversed(valid):
+        if all(abs(loc - prev) >= spacing for prev in chosen):
+            chosen.append(loc)
+        if len(chosen) >= FX21_BACKTESTS:
+            break
+    chosen.sort()
+    return [pd.Timestamp(s.index[i]) for i in chosen]
+
+
+def _fx21_gate(
+    card: dict[str, Any],
+    spec: ForecastSpec,
+    history: dict[str, pd.Series],
+    steps: np.ndarray,
+) -> bool:
+    """Cutoff-safe reliability gate. Any ambiguity returns exact V2."""
+    try:
+        if not _fx21_structurally_eligible(card, spec):
+            return False
+        asset = spec.assets[0]
+        step = int(steps[0, 0])
+        if step < 1:
+            return False
+        series = history[asset].sort_index()
+        origins = _fx21_recent_origins(series, step)
+        deltas: list[float] = []
+
+        for origin in origins:
+            loc = int(series.index.get_loc(origin))
+            if loc + step >= len(series):
+                continue
+            y = float(series.iloc[loc + step])
+            sliced = {asset: series.loc[:origin].copy()}
+            pseudo_spec = replace(spec, asof=origin.date().isoformat())
+
+            # Gate replay is intentionally restricted to the same primary V2 path
+            # used by every validated V5-FX21 support case. Any primary failure is
+            # a no-op rather than an attempt to calibrate a fallback forecast.
+            drifts, scales, corr = _estimate_level_m0_parameters(sliced, pseudo_spec)
+            v2 = _simulate_draws(
+                pseudo_spec, sliced, drifts, scales, corr, steps, N_DRAWS
+            )
+            anchor = np.asarray([float(sliced[asset].iloc[-1])], dtype=float)
+            m0 = _simulate_gaussian_fallback(
+                pseudo_spec,
+                drifts,
+                scales,
+                corr,
+                anchor,
+                steps,
+                N_DRAWS,
+                "v3-a0-m0",
+            )
+
+            m0_marginal, m0_tail, _wm, _wt = _fx21_raw_components(
+                m0[:, 0, 0], y, card
+            )
+            base_score = _fx21_normalized_score(
+                v2[:, 0, 0], y, card, m0_marginal, m0_tail
+            )
+            probe = _fx21_scale_draws(v2, FX21_GATE_PROBE_SCALE)
+            probe_score = _fx21_normalized_score(
+                probe[:, 0, 0], y, card, m0_marginal, m0_tail
+            )
+            deltas.append(probe_score - base_score)
+
+        if len(deltas) < FX21_MIN_VALID:
+            return False
+        arr = np.asarray(deltas, dtype=float)
+        return bool(
+            float(np.mean(arr < 0.0)) >= FX21_MIN_WIN_RATE
+            and float(np.mean(arr)) <= FX21_MAX_MEAN_DELTA
+            and float(np.max(arr)) <= FX21_MAX_WORST_DELTA
+        )
+    except Exception:
+        return False
+
+
 def _write_outputs(
     out_path: Path,
     spec: ForecastSpec,
@@ -651,7 +860,26 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
             drifts, scales, corr = _estimate_parameters(innov, spec)
         steps = _step_matrix(root, spec, history)
         draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
-        _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
+        if _fx21_gate(_card, spec, history, steps):
+            draws = _fx21_scale_draws(draws, FX21_ACTION_SCALE)
+            _write_outputs(
+                out_path,
+                spec,
+                draws,
+                method="primary_v5_fx21",
+                rationale_body=(
+                    "This unit uses the primary V2 numerical forecast plus the frozen V5-FX21 "
+                    "dispersion calibration. The calibration is available only for validated "
+                    "single-cell, 21-day, non-AUD/CAD G10 FX tasks. Eight cutoff-safe historical "
+                    "pseudo-origins test whether a 5% dispersion contraction has recently improved "
+                    "the same normalized proper-score objective; when the frozen reliability gate "
+                    "passes, the current forecast contracts dispersion by only 2.5% around its "
+                    "sample mean. Otherwise the system returns the exact V2 forecast. No text, "
+                    "House model, network call, card ID, or future outcome is used."
+                ),
+            )
+        else:
+            _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
         return out_path
     except Exception:
         _clean_participant_outputs(out_path)
