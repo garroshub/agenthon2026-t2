@@ -62,9 +62,7 @@ def _step_series(s: pd.Series, target_type: str) -> pd.Series:
     elif target_type=='log_return':
         if np.median(np.abs(vals[np.isfinite(vals)]))>=0.2:
             raise ValueError('log_return_tripwire')
-        if np.any(vals<=-1.0):
-            raise ValueError('invalid_simple_return')
-        step=np.log1p(vals)
+        step=vals.copy()
         step[0]=np.nan
     else:
         raise ValueError(target_type)

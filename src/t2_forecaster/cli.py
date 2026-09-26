@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from . import m0_core
@@ -10,8 +11,9 @@ N_DRAWS = 500
 
 
 def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int = N_DRAWS) -> Path:
-    if not (200 <= int(n_draws) <= 20000):
-        raise ValueError("n_draws must be in [200, 20000]")
+    # M0 is defined as exactly 500 draws. Accept the interface argument for
+    # compatibility, but never let the harness alter the diagnostic baseline.
+    _ = n_draws
 
     ctx = v2_safe._resolve_input_context(panels)
     root = ctx.unit_root
@@ -21,7 +23,7 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
 
     try:
         draws, diag = m0_core.generate(
-            root,
+            ctx.panel_dir,
             spec.unit_id,
             spec.asof,
             list(spec.assets),
@@ -31,27 +33,35 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
             step_matrix=None,
             order="sorted",
             base_draws=500,
-            output_draws=int(n_draws),
+            output_draws=N_DRAWS,
         )
         v2_safe._write_outputs(
             out_path,
             spec,
             draws,
-            method="v5_m0_faithful",
+            method="v5_m0_raw_probe",
             rationale_body=(
                 "This forecast implements the published Track 2 M0 text-blind baseline procedure. "
                 "It uses the trailing 300 observations per asset, gap-filtered and date-aligned step "
                 "series, unshrunk step means and sample covariance, a shared Gaussian random-walk path "
                 "across assets and horizons with covariance min(s_i,s_j)*Sigma, the published CRC32 "
                 "unit seed, and the published monthly-panel step overrides. Level targets anchor at "
-                "the last panel observation. Cumulative log-return targets use log1p of the supplied "
-                "simple-return rows and a zero anchor. No text or House-model call is used."
+                "the last panel observation. Cumulative log-return targets use the supplied per-step "
+                "return rows directly and a zero anchor. The forecast always emits exactly 500 draws "
+                "from the published CRC32 unit seed and ignores QFBENCH_SEED. No text or House-model call is used."
             ),
         )
         return out_path
     except Exception:
         v2_safe._clean_participant_outputs(out_path)
-        return v2_safe.forecast_unit(panels, asof, out, int(n_draws))
+        # Hard data/contract fallback only. Public audit requires zero fallbacks.
+        # Keep even the emergency path independent of harness seed variation.
+        prior_seed = os.environ.pop("QFBENCH_SEED", None)
+        try:
+            return v2_safe.forecast_unit(panels, asof, out, N_DRAWS)
+        finally:
+            if prior_seed is not None:
+                os.environ["QFBENCH_SEED"] = prior_seed
 
 
 def build_parser() -> argparse.ArgumentParser:
