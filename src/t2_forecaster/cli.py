@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .v5_fx_calibration import eligible_full_history_fx, evaluate_gate, shrink_dispersion
+
 N_DRAWS = 1000
 STUDENT_DF = 7.0
 PARTICIPANT_OUTPUT_FILES = ("forecast.parquet", "forecast_meta.json", "forecast_rationale.md")
@@ -587,6 +589,35 @@ def _simulate_gaussian_fallback(
     return out
 
 
+
+def _v5_backtest_v2_draws(
+    spec: ForecastSpec,
+    sliced: dict[str, pd.Series],
+    steps: np.ndarray,
+) -> np.ndarray:
+    try:
+        drifts, scales, corr = _estimate_level_m0_parameters(sliced, spec)
+        return _simulate_draws(spec, sliced, drifts, scales, corr, steps, N_DRAWS)
+    except Exception:
+        drifts, scales, corr, anchors = _universal_safe_parameters(sliced, spec)
+        return _simulate_gaussian_fallback(
+            spec, drifts, scales, corr, anchors, steps, N_DRAWS, "universal-safe"
+        )
+
+
+def _v5_backtest_m0_draws(
+    spec: ForecastSpec,
+    sliced: dict[str, pd.Series],
+    steps: np.ndarray,
+) -> np.ndarray:
+    drifts, scales, corr = _estimate_level_m0_parameters(sliced, spec)
+    anchors = np.asarray([float(sliced[a].iloc[-1]) for a in spec.assets], dtype=float)
+    return _simulate_gaussian_fallback(
+        spec, drifts, scales, corr, anchors, steps, N_DRAWS, "v3-a0-m0"
+    )
+
+
+
 def _write_outputs(
     out_path: Path,
     spec: ForecastSpec,
@@ -651,7 +682,32 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
             drifts, scales, corr = _estimate_parameters(innov, spec)
         steps = _step_matrix(root, spec, history)
         draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
-        _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
+        method = "primary_v1_hybrid"
+        rationale_body = None
+        if int(n_draws) == N_DRAWS and eligible_full_history_fx(_card, spec):
+            try:
+                activate, _gate_diag = evaluate_gate(
+                    card=_card,
+                    spec=spec,
+                    history=history,
+                    steps=steps,
+                    v2_draws_fn=_v5_backtest_v2_draws,
+                    m0_draws_fn=_v5_backtest_m0_draws,
+                )
+                if activate:
+                    draws = shrink_dispersion(draws)
+                    method = "v5_fx_safe_calibration"
+                    rationale_body = (
+                        "This unit uses the V2 numerical forecast as its full location and dependence backbone. "
+                        "Because the task is a full-history G10 FX level forecast, a cutoff-safe rolling-origin "
+                        "calibration gate is evaluated using only outcomes already observed by the supplied as-of "
+                        "date. When that gate shows stable historical benefit, the forecast preserves the V2 mean "
+                        "and joint draw ordering while shrinking dispersion by 1 percent. If the gate does not pass, "
+                        "the output remains the exact V2 forecast. Sparse-transfer FX tasks are excluded."
+                    )
+            except Exception:
+                pass
+        _write_outputs(out_path, spec, draws, method=method, rationale_body=rationale_body)
         return out_path
     except Exception:
         _clean_participant_outputs(out_path)
