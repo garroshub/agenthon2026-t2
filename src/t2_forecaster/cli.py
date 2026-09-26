@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .fx_calibration import maybe_calibrate
+
 N_DRAWS = 1000
 STUDENT_DF = 7.0
 PARTICIPANT_OUTPUT_FILES = ("forecast.parquet", "forecast_meta.json", "forecast_rationale.md")
@@ -633,6 +635,20 @@ def _write_outputs(
     (out_dir / "forecast_rationale.md").write_text(rationale, encoding="utf-8")
 
 
+
+def _fx_gate_v2_factory(spec: ForecastSpec, history: dict[str, pd.Series], steps: np.ndarray, n_draws: int) -> np.ndarray:
+    drifts, scales, corr = _estimate_level_m0_parameters(history, spec)
+    return _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
+
+
+def _fx_gate_m0_factory(spec: ForecastSpec, history: dict[str, pd.Series], steps: np.ndarray, n_draws: int) -> np.ndarray:
+    drifts, scales, corr = _estimate_level_m0_parameters(history, spec)
+    anchors = np.asarray([float(history[a].iloc[-1]) for a in spec.assets], dtype=float)
+    return _simulate_gaussian_fallback(
+        spec, drifts, scales, corr, anchors, steps, int(n_draws), "v3-a0-m0"
+    )
+
+
 def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int = N_DRAWS) -> Path:
     ctx = _resolve_input_context(panels)
     root = ctx.unit_root
@@ -651,7 +667,35 @@ def forecast_unit(panels: str | Path, asof: str, out: str | Path, n_draws: int =
             drifts, scales, corr = _estimate_parameters(innov, spec)
         steps = _step_matrix(root, spec, history)
         draws = _simulate_draws(spec, history, drifts, scales, corr, steps, int(n_draws))
-        _write_outputs(out_path, spec, draws, method="primary_v1_hybrid")
+        method = "primary_v1_hybrid"
+        rationale_body = None
+        try:
+            calibration = maybe_calibrate(
+                card=_card,
+                spec=spec,
+                history=history,
+                steps=steps,
+                current_draws=draws,
+                v2_factory=_fx_gate_v2_factory,
+                m0_factory=_fx_gate_m0_factory,
+            )
+            if calibration.applied:
+                draws = calibration.draws
+                method = "v5_fx_safe_calibration"
+                rationale_body = (
+                    "This unit uses the V2 numerical forecast as its center and dependence backbone. "
+                    "Because it is a daily G10-FX level task, the submission replays up to eight "
+                    "cutoff-safe historical origins whose realized horizons end before the supplied "
+                    "as-of date. It compares the unchanged V2 distribution with a 2.5% dispersion "
+                    "shrink using the Track 2 normalized composite. The shrink is applied only when "
+                    "at least six replays are available, at least 62.5% favor the calibrated forecast, "
+                    "their mean score delta is at most -0.002, and no replay loses more than 0.05. "
+                    "All other units and failed gates return the original V2 forecast unchanged. "
+                    "No text, House model, card title, unit ID routing, or post-cutoff observation is used."
+                )
+        except Exception:
+            pass
+        _write_outputs(out_path, spec, draws, method=method, rationale_body=rationale_body)
         return out_path
     except Exception:
         _clean_participant_outputs(out_path)
