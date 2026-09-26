@@ -587,6 +587,20 @@ def _simulate_gaussian_fallback(
     return out
 
 
+V5_S95_PANELS = {"rates_daily", "g10_fx_daily", "macro_monthly"}
+V5_S95_SCALE = 0.95
+
+def _apply_v5_s95(spec: ForecastSpec, draws: np.ndarray) -> np.ndarray:
+    x = np.asarray(draws, dtype=float)
+    if spec.target_panel not in V5_S95_PANELS:
+        return x
+    center = np.mean(x, axis=0, keepdims=True)
+    out = center + V5_S95_SCALE * (x - center)
+    if not np.all(np.isfinite(out)):
+        raise FloatingPointError("non-finite V5-S95 calibrated forecast")
+    return out
+
+
 def _write_outputs(
     out_path: Path,
     spec: ForecastSpec,
@@ -596,6 +610,10 @@ def _write_outputs(
 ) -> None:
     out_dir = out_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    calibrated = spec.target_panel in V5_S95_PANELS
+    draws = _apply_v5_s95(spec, draws)
+    if calibrated:
+        method = method + "_v5_s95"
     n_draws, n_assets, n_horizons = draws.shape
     rows = n_draws * n_assets * n_horizons
     draw_col = np.repeat(np.arange(n_draws, dtype=np.int32), n_assets * n_horizons)
@@ -621,6 +639,10 @@ def _write_outputs(
     }
     (out_dir / "forecast_meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     if rationale_body is None:
+        calibration_text = (
+            " For rates, G10 FX, and monthly macro targets, V5 applies a frozen 0.95 dispersion calibration around each forecast cell mean; factor-return targets retain the original V2 distribution."
+            if calibrated else ""
+        )
         rationale_body = (
             "This submission uses only panel observations available through the supplied as-of date. "
             "For level targets it uses a trailing-300 joint Gaussian random walk with unshrunk mean "
@@ -628,6 +650,7 @@ def _write_outputs(
             "log-return targets it converts decimal simple returns with log1p, shrinks recent drift, "
             "uses a 0.90 robust/EWMA scale multiplier and shrunk cross-asset correlation, then simulates "
             "finite-variance Student-t innovations from a zero anchor. No text or House-model call is used."
+            + calibration_text
         )
     rationale = "# Forecast rationale\n\n" + rationale_body.strip() + "\n"
     (out_dir / "forecast_rationale.md").write_text(rationale, encoding="utf-8")
